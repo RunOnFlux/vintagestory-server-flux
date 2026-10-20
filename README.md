@@ -27,8 +27,8 @@ version the owner asks for, and run on .NET 10 under a supervisor that:
 
 | Path | Flux mount | What |
 |---|---|---|
-| `/mnt/vs/data` | `g:` (synced) | the server's `--dataPath`: `Saves/` (the worlds), `serverconfig.json`, `Playerdata/` (roles, whitelist, bans), `Mods/`, and `flux/` (our log, state, backups, the world catalog, disabled mods) |
-| `/mnt/vs/server` | `ml:server` (local) | the game, one folder per version under `versions/` (about 330 MB each; the running one and the one before are kept), `current` pointing at the running one, and the game's logs (`logs/`). Downloaded again on a new node |
+| `/mnt/vs/data` | `g:` (synced) | the server's `--dataPath`: `Saves/` (the worlds), `serverconfig.json`, `Playerdata/` (roles, whitelist, bans), `Mods/`, and `flux/` (state, backups, the world catalog, disabled mods) |
+| `/mnt/vs/server` | `ml:server` (local) | the game, one folder per version under `versions/` (about 330 MB each; the running one and the one before are kept), `current` pointing at the running one, and the game's logs (`logs/`). Downloaded again on a new node Also `flux-logs/flux.log` (our supervisor log, 5 MB then one `.1`): local, never synced. |
 
 Spec: `g:/mnt/vs/data|ml:server:/mnt/vs/server`.
 
@@ -92,6 +92,7 @@ refusal).
 ## Versions
 
 - 1.0.0 (2026-10-18): first release.
+- 1.0.1 (2026-10-20): `flux.log` moved off the synced data volume to `/mnt/vs/server/flux-logs/flux.log` (5 MB, one `.1`; an old one is moved there once); start-up banner; the weekly rebuild only when it has something to apply.
 
 ## Development
 

@@ -45,6 +45,9 @@ d="${FLUX_DATA_DIR}"
 
 rm -f "${FLUX_RESTART_MARKER}"
 mkdir -p "${s}" "${d}" "${FLUX_DIR}" "${FLUX_GAME_LOG_DIR}"
+# An older image kept flux.log on the synced data volume: move it here, once.
+flux_log_migrate "${FLUX_DIR}/flux.log"
+flux_banner "Vintage Story"
 
 if [ -n "${VS_PORT:-}" ] && ! flux_valid_port "${VS_PORT}" >/dev/null; then
   flux_log "ERROR VS_PORT='${VS_PORT}' is not a port from 1024 to 65535; refusing to start"
@@ -211,6 +214,7 @@ start_generation() {
 
   write_state starting "The world is loading."
   printf '%s\n' "${generation}" >"${FLUX_GENERATION_FILE}"
+  flux_banner "Vintage Story"
   flux_log "starting the server (generation ${generation}, Vintage Story ${installed})"
   start_server
   helpers=()
