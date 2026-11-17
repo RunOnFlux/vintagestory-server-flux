@@ -313,23 +313,43 @@ class Backups(Base):
         self.vs.clean_stale_backup_files()
         self.assertEqual(os.listdir(self.vs.BACKUP_DIR), ["20260101-010000-start.tar.gz.part"])
 
+    def _volume(self, limit):
+        """disk_usage as a volume of `limit` bytes holding only the backups folder."""
+        real = self.vs.shutil.disk_usage
+        self.addCleanup(setattr, self.vs.shutil, "disk_usage", real)
+
+        def usage(_p):
+            used = sum(os.path.getsize(os.path.join(self.vs.BACKUP_DIR, n)) for n in os.listdir(self.vs.BACKUP_DIR))
+            return type("U", (), {"free": limit - used})()
+        self.vs.shutil.disk_usage = usage
+
     def test_room_is_made_by_deleting_the_oldest_but_never_the_newest_or_before_restore(self):
-        self._backups([("20260101-000000-before-restore.tar.gz", 1), ("20260101-010000-every-6h.tar.gz", 1),
-                       ("20260101-020000-every-6h.tar.gz", 1), ("20260101-030000-every-6h.tar.gz", 1)])
-        free = iter([0, 0, 10 ** 12, 10 ** 12])
-        self.vs.shutil.disk_usage = lambda _p: type("U", (), {"free": next(free)})()
-        self.vs.make_room_for_backup(1000)
-        left = sorted(os.listdir(self.vs.BACKUP_DIR))
+        self._backups([("20260101-000000-before-restore.tar.gz", 100), ("20260101-010000-every-6h.tar.gz", 100),
+                       ("20260101-020000-every-6h.tar.gz", 100), ("20260101-030000-every-6h.tar.gz", 100)])
+        self._volume(450)
+        self.vs.make_room_for_backup(150)
+        left = os.listdir(self.vs.BACKUP_DIR)
         self.assertIn("20260101-000000-before-restore.tar.gz", left)
         self.assertIn("20260101-030000-every-6h.tar.gz", left)
         self.assertNotIn("20260101-010000-every-6h.tar.gz", left)
+        self.assertIn("20260101-020000-every-6h.tar.gz", left)
 
-    def test_no_backup_is_better_than_one_that_fills_the_volume(self):
-        self._backups([("20260101-030000-every-6h.tar.gz", 1)])
-        self.vs.shutil.disk_usage = lambda _p: type("U", (), {"free": 5})()
+    def test_the_backup_a_restore_will_read_is_never_deleted(self):
+        self._backups([("20260101-000000-every-6h.tar.gz", 100), ("20260101-010000-every-6h.tar.gz", 100),
+                       ("20260101-020000-every-6h.tar.gz", 100)])
+        self._volume(320)
+        self.vs.make_room_for_backup(110, protect="20260101-000000-every-6h.tar.gz")
+        left = os.listdir(self.vs.BACKUP_DIR)
+        self.assertIn("20260101-000000-every-6h.tar.gz", left)
+        self.assertNotIn("20260101-010000-every-6h.tar.gz", left)
+
+    def test_no_backup_is_better_than_one_that_fills_the_volume_and_nothing_is_deleted(self):
+        self._backups([("20260101-000000-every-6h.tar.gz", 100), ("20260101-010000-every-6h.tar.gz", 100),
+                       ("20260101-030000-every-6h.tar.gz", 100)])
+        self._volume(305)
         with self.assertRaises(self.vs.Fail):
             self.vs.make_room_for_backup(1000)
-        self.assertEqual(len(os.listdir(self.vs.BACKUP_DIR)), 1)
+        self.assertEqual(len(os.listdir(self.vs.BACKUP_DIR)), 3)
 
     def test_names_from_the_panel_are_plain_file_names(self):
         self.assertEqual(self.vs.safe_name("20261018-210204-manual.tar.gz"), "20261018-210204-manual.tar.gz")
