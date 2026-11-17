@@ -56,7 +56,7 @@ the file's own value.
 | `VS_WORLD_NAME`, `VS_SEED`, `VS_PLAYSTYLE`, `VS_WORLD_SIZE` | `WorldConfig` | **the first world only** (a save that does not exist yet). Play styles: `surviveandbuild` (standard), `exploration`, `wildernesssurvival`, `homosapiens`, `creativebuilding`. Sizes: the game's `worldWidth` values, `1024000` by default |
 
 Supervisor knobs: `FLUX_BACKUP_HOURS` (6), `FLUX_BACKUP_KEEP` (8; a `before-restore` backup is
-never rotated away), `FLUX_UPDATE_CHECK_MINUTES` (30, 0 = off), `FLUX_UPDATE_GRACE_MINUTES` (5),
+never rotated away; a backup also deletes the oldest ones when the volume lacks the space for it, and is skipped rather than fill the volume), `FLUX_UPDATE_CHECK_MINUTES` (30, 0 = off), `FLUX_UPDATE_GRACE_MINUTES` (5),
 `FLUX_RESTART_MAX_ATTEMPTS` (5 in `FLUX_RESTART_WINDOW` 3600 s, then exit 42),
 `FLUX_INSTALL_RETRY_MINUTES` (5).
 
@@ -92,6 +92,7 @@ refusal).
 ## Versions
 
 - 1.0.0 (2026-10-18): first release.
+- 1.0.2 (2026-11-17): a backup no longer fills the data volume (a full volume stops the game from starting): it makes room by deleting the oldest backups first, is skipped when that is not enough, and the leftovers of an interrupted backup (`*.tar.gz.part`) are cleaned at the next one.
 - 1.0.1 (2026-10-20): `flux.log` moved off the synced data volume to `/mnt/vs/server/flux-logs/flux.log` (5 MB, one `.1`; an old one is moved there once); start-up banner; the weekly rebuild only when it has something to apply.
 
 ## Development

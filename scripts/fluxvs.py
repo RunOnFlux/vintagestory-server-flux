@@ -1352,12 +1352,66 @@ def list_backups():
     return sorted(res, key=lambda b: b["created"], reverse=True)
 
 
+# The game refuses to start with under 400 MB free, so a backup must leave more than that.
+BACKUP_RESERVE_BYTES = 600 * 1024 * 1024
+STALE_PART_SECONDS = 15 * 60
+
+
+def clean_stale_backup_files():
+    """Delete what an interrupted backup left behind: `*.tar.gz.part` (a copy that never
+    finished) and the game's own `flux-*.vcdbs` copy. Only files untouched for a while: a
+    backup that is writing right now keeps growing its file."""
+    now = time.time()
+    for folder, ok in ((BACKUP_DIR, lambda n: n.endswith(".tar.gz.part")),
+                       (GAME_BACKUPS, lambda n: n.startswith("flux-") and n.endswith(".vcdbs"))):
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for n in names:
+            p = os.path.join(folder, n)
+            try:
+                if ok(n) and now - os.path.getmtime(p) > STALE_PART_SECONDS:
+                    os.remove(p)
+                    log(f"removed the leftover of an interrupted backup: {n}")
+            except OSError:
+                pass
+
+
+def backup_space_needed(src, live):
+    """Bytes a new backup needs: the game's own copy of the world (live only) plus the archive
+    (about the size of the newest one, else as big as the world), plus a reserve for the game."""
+    size = sum(os.path.getsize(p) for p in (src, src + "-wal") if os.path.exists(p))
+    backups = list_backups()
+    archive = backups[0]["size"] if backups else size
+    return (size if live else 0) + int(archive * 1.1) + BACKUP_RESERVE_BYTES
+
+
+def make_room_for_backup(need):
+    """Delete the oldest backups until `need` bytes are free. A before-restore backup and the
+    newest backup are never deleted. Raises Fail when that is not enough: a backup that fills the
+    volume stops the whole server, so no backup is better than that one."""
+    def free():
+        return shutil.disk_usage(DATA_DIR).free
+    for old in reversed(list_backups()[1:]):
+        if free() >= need:
+            break
+        if old["label"] != "before-restore":
+            os.remove(os.path.join(BACKUP_DIR, old["file"]))
+            log(f"backup space: removed {old['file']} to make room for a new one")
+    if free() < need:
+        raise Fail(f"Not enough free space for a backup ({free() // 2**20} MB free, "
+                   f"{need // 2**20} MB needed). Free some space or lower FLUX_BACKUP_KEEP")
+
+
 def make_backup(why, live):
     save = current_save()
     src = os.path.join(SAVES, save)
     if not os.path.exists(src):
         raise Fail("There is no world to back up yet")
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    clean_stale_backup_files()
+    make_room_for_backup(backup_space_needed(src, live))
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     label = re.sub(r"[^a-z0-9]+", "-", str(why).lower()).strip("-")[:30] or "manual"
     copy = None
