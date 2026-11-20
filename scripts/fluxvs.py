@@ -59,7 +59,10 @@ SERVER_DIR = os.environ.get("FLUX_SERVER_DIR", "/mnt/vs/server")
 DATA_DIR = os.environ.get("FLUX_DATA_DIR", "/mnt/vs/data")
 FLUX_DIR = os.environ.get("FLUX_DIR", os.path.join(DATA_DIR, "flux"))
 STATE_FILE = os.environ.get("FLUX_STATE_FILE", os.path.join(FLUX_DIR, "state.json"))
-BACKUP_DIR = os.environ.get("FLUX_BACKUP_DIR", os.path.join(FLUX_DIR, "backups"))
+# Backups live on the ml: mount (/mnt/vs/server): never replicated. On the synced data volume
+# every backup (and the game's transient 3 GB copy of the world) was copied to the other node too.
+BACKUP_DIR = os.environ.get("FLUX_BACKUP_DIR", os.path.join(SERVER_DIR, "backups"))
+OLD_BACKUP_DIR = os.path.join(FLUX_DIR, "backups")  # where 1.0.0 to 1.0.2 kept them (synced)
 GAME_LOG_DIR = os.environ.get("FLUX_GAME_LOG_DIR", os.path.join(SERVER_DIR, "logs"))
 VERSIONS_URL = os.environ.get("FLUX_VERSIONS_URL", "https://api.vintagestory.at/stable.json")
 MODDB_API = os.environ.get("FLUX_MODDB_API", "https://mods.vintagestory.at/api")
@@ -71,7 +74,8 @@ SAVES = os.path.join(DATA_DIR, "Saves")
 MODS = os.path.join(DATA_DIR, "Mods")
 MODS_OFF = os.path.join(FLUX_DIR, "mods-disabled")
 PLAYERDATA = os.path.join(DATA_DIR, "Playerdata")
-GAME_BACKUPS = os.path.join(DATA_DIR, "Backups")
+GAME_BACKUPS = os.path.join(DATA_DIR, "Backups")  # the game writes /genbackup here: a symlink (see ensure_backup_layout)
+GAME_BACKUPS_LOCAL = os.path.join(SERVER_DIR, "gamebackups")
 NEW_WORLD = os.path.join(FLUX_DIR, "new-world.json")
 USE_WORLD = os.path.join(FLUX_DIR, "use-world.json")
 RESTORE = os.path.join(FLUX_DIR, "restore.json")
@@ -1333,7 +1337,7 @@ def cmd_ensure_mods(_args):
 
 
 # ----------------------------------------------------------------------------------------------
-# Backups: the world, the players' data and serverconfig.json, as one .tar.gz in flux/backups.
+# Backups: the world, the players' data and serverconfig.json, as one .tar.gz in /mnt/vs/server/backups (local).
 # A running world is copied by the game itself (/genbackup: a consistent copy of the SQLite save);
 # a stopped one is copied as it is.
 # ----------------------------------------------------------------------------------------------
@@ -1353,7 +1357,10 @@ def list_backups():
 
 
 # The game refuses to start with under 400 MB free, so a backup must leave more than that.
-BACKUP_RESERVE_BYTES = 600 * 1024 * 1024
+BACKUP_RESERVE_BYTES = 1024 * 1024 * 1024
+# The backups never take more than this share of the volume, whatever FLUX_BACKUP_KEEP says: on a
+# 15 GB volume with a 3.5 GB world, 8 backups of 1.1 GB left no room for the next one.
+BACKUP_VOLUME_SHARE = 0.4
 STALE_PART_SECONDS = 15 * 60
 
 
@@ -1376,6 +1383,148 @@ def clean_stale_backup_files():
                     log(f"removed the leftover of an interrupted backup: {n}")
             except OSError:
                 pass
+
+
+def backup_dir_for_panel():
+    """BACKUP_DIR as the node's file manager names it: the data volume is `appdata`, the ml:
+    mount `server`. The panel downloads a backup from there."""
+    for root, name in ((SERVER_DIR, "server"), (DATA_DIR, "appdata")):
+        rel = os.path.relpath(BACKUP_DIR, root)
+        if not rel.startswith(".."):
+            return f"{name}/{rel}".replace(os.sep, "/")
+    return None
+
+
+def _link_game_backups():
+    """`<data>/Backups` (where the game puts its /genbackup copy) must be a symlink to the local
+    mount. The game ignores any directory in the name it is given (tested on 1.22.7), so the link
+    is the only way to keep its 3 GB copy off the synced volume."""
+    os.makedirs(GAME_BACKUPS_LOCAL, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    target = os.path.relpath(GAME_BACKUPS_LOCAL, DATA_DIR)
+    if os.path.islink(GAME_BACKUPS):
+        if os.readlink(GAME_BACKUPS) == target:
+            return
+        os.remove(GAME_BACKUPS)
+    elif os.path.isdir(GAME_BACKUPS):
+        for n in os.listdir(GAME_BACKUPS):
+            p = os.path.join(GAME_BACKUPS, n)
+            try:
+                if n.startswith("flux-") and n.endswith(".vcdbs") or n.endswith(".tmp"):
+                    os.remove(p)  # our own transient copy (or a half-synced one): never worth moving
+                else:
+                    shutil.move(p, os.path.join(GAME_BACKUPS_LOCAL, n))
+            except OSError as e:
+                log(f"WARN could not move {n} out of Backups/: {e}")
+        try:
+            os.rmdir(GAME_BACKUPS)
+        except OSError:
+            log("WARN Backups/ is not empty; the game keeps writing its backup copy there")
+            return
+    elif os.path.lexists(GAME_BACKUPS):
+        return
+    os.symlink(target, GAME_BACKUPS)
+
+
+def _move_old_backups():
+    """The backups 1.0.0 to 1.0.2 kept on the synced volume move to the local mount, newest first,
+    one file at a time (copy, then delete) so the volume never needs room for two copies. What does
+    not fit goes: the world is what matters, and a backup is replaceable. A before-restore backup
+    is never deleted, only left where it is when it cannot be moved."""
+    old = OLD_BACKUP_DIR
+    if os.path.abspath(old) == os.path.abspath(BACKUP_DIR) or not os.path.isdir(old):
+        return
+    keep = int(os.environ.get("FLUX_BACKUP_KEEP", "8") or 8)
+    files = []
+    for n in os.listdir(old):
+        p = os.path.join(old, n)
+        if n.endswith(".tar.gz.part"):
+            os.remove(p)
+        elif n.endswith(".tar.gz"):
+            m = re.match(r"^\d{8}-\d{6}-(.+)\.tar\.gz$", n)
+            files.append((n, os.stat(p), m.group(1) if m else None))
+    files.sort(key=lambda f: f[1].st_mtime, reverse=True)
+    files.sort(key=lambda f: f[2] != "before-restore")  # stable: those first, each group newest first
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    moved = dropped = kept_in_place = 0
+    plain = 0
+    for n, st, label in files:
+        src, dst = os.path.join(old, n), os.path.join(BACKUP_DIR, n)
+        if os.path.exists(dst):
+            os.remove(src)
+            continue
+        if label != "before-restore":
+            plain += 1
+            if plain > keep:
+                os.remove(src)
+                dropped += 1
+                continue
+        if shutil.disk_usage(BACKUP_DIR).free < st.st_size + BACKUP_RESERVE_BYTES:
+            if label == "before-restore":
+                kept_in_place += 1
+            else:
+                os.remove(src)
+                dropped += 1
+            continue
+        part = dst + ".part"
+        try:
+            shutil.copyfile(src, part)
+            os.utime(part, (st.st_atime, st.st_mtime))
+            os.replace(part, dst)
+        except OSError as e:
+            if os.path.exists(part):
+                os.remove(part)
+            log(f"WARN could not move the backup {n}: {e}")
+            continue
+        os.remove(src)
+        moved += 1
+    try:
+        os.rmdir(old)
+    except OSError:
+        pass
+    log(f"backups moved off the synced volume: {moved} moved, {dropped} removed (no room or over the limit)"
+        + (f", {kept_in_place} left in place" if kept_in_place else ""))
+
+
+def ensure_backup_layout():
+    """Run at every start, before a restore or a backup reads or writes anything."""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    # Nothing is writing yet, so every half-written copy is a leftover of an interrupted backup.
+    for folder, ok in ((BACKUP_DIR, lambda n: n.endswith(".tar.gz.part")),
+                       (GAME_BACKUPS_LOCAL, lambda n: n.startswith("flux-") and n.endswith(".vcdbs"))):
+        for n in (os.listdir(folder) if os.path.isdir(folder) else []):
+            if ok(n):
+                try:
+                    os.remove(os.path.join(folder, n))
+                    log(f"removed the leftover of an interrupted backup: {n}")
+                except OSError:
+                    pass
+    _move_old_backups()
+    _link_game_backups()
+
+
+def cmd_layout(_args):
+    try:
+        ensure_backup_layout()
+    except OSError as e:
+        log(f"WARN backups: {e}")
+    return 0
+
+
+def trim_backups_to_budget(protect=None, extra=0):
+    """Delete the oldest backups while they (plus `extra`, the one about to be made) take more
+    than BACKUP_VOLUME_SHARE of the volume. The newest, a before-restore and `protect` stay."""
+    budget = int(shutil.disk_usage(BACKUP_DIR).total * BACKUP_VOLUME_SHARE)
+    backups = list_backups()
+    used = sum(b["size"] for b in backups) + extra
+    for old in reversed(backups[1:]):
+        if used <= budget:
+            break
+        if old["label"] == "before-restore" or old["file"] == protect:
+            continue
+        os.remove(os.path.join(BACKUP_DIR, old["file"]))
+        used -= old["size"]
+        log(f"backup space: removed {old['file']}: backups may take {int(BACKUP_VOLUME_SHARE * 100)}% of the volume")
 
 
 def backup_space_needed(src, live):
@@ -1412,7 +1561,9 @@ def make_backup(why, live, protect=None):
     if not os.path.exists(src):
         raise Fail("There is no world to back up yet")
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    _link_game_backups()
     clean_stale_backup_files()
+    trim_backups_to_budget(protect, int((list_backups() or [{"size": 0}])[0]["size"] * 1.1))
     make_room_for_backup(backup_space_needed(src, live), protect)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     label = re.sub(r"[^a-z0-9]+", "-", str(why).lower()).strip("-")[:30] or "manual"
@@ -1479,7 +1630,8 @@ def cmd_backup(args):
 
 
 def cmd_backups(_args):
-    out({"backups": list_backups(), "pendingRestore": read_json(RESTORE), "world": current_save()})
+    out({"backups": list_backups(), "pendingRestore": read_json(RESTORE), "world": current_save(),
+         "dir": backup_dir_for_panel()})
 
 
 def cmd_backup_now(args):
@@ -1560,7 +1712,7 @@ def cmd_restart(args):
 
 COMMANDS = {
     "install": cmd_install, "latest": cmd_latest, "apply": cmd_apply, "catalog": cmd_catalog,
-    "ensure-mods": cmd_ensure_mods, "admins": cmd_admins, "backup": cmd_backup,
+    "ensure-mods": cmd_ensure_mods, "admins": cmd_admins, "backup": cmd_backup, "layout": cmd_layout,
     "status": cmd_status, "online": cmd_online, "players": cmd_players, "world": cmd_world, "set-world": cmd_set_world,
     "worlds": cmd_worlds, "new-world": cmd_new_world, "use-world": cmd_use_world, "delete-world": cmd_delete_world,
     "mods": cmd_mods, "mod-install": cmd_mod_install, "mod-remove": cmd_mod_remove,
@@ -1571,7 +1723,7 @@ COMMANDS = {
 }
 
 # The supervisor's commands: plain text out, errors on stderr.
-INTERNAL = {"install", "latest", "apply", "catalog", "ensure-mods", "admins", "backup"}
+INTERNAL = {"install", "latest", "apply", "catalog", "ensure-mods", "admins", "backup", "layout"}
 
 
 def main(argv):

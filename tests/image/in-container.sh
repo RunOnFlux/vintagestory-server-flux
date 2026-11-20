@@ -102,8 +102,10 @@ check "set-world sets" "True" "$(flux-vs set-world '{"temporalStorms":"rare"}' |
 check "set-world refuses a creation-only setting" "1" "$(status flux-vs set-world '{"worldWidth":"256000"}')"
 b="$(flux-vs backup-now)"
 check "a backup through /genbackup" "True" "$(json 'd["ok"]' <<<"${b}")"
-check "it holds the world" "0" "$(status bash -c "tar -tzf ${d}/flux/backups/$(json 'd["file"]' <<<"${b}") | grep -q Saves/default.vcdbs")"
-check "the game's copy is cleaned up" "" "$(ls "${d}/Backups" 2>/dev/null)"
+check "it holds the world" "0" "$(status bash -c "tar -tzf /mnt/vs/server/backups/$(json 'd["file"]' <<<"${b}") | grep -q Saves/default.vcdbs")"
+check "the game's copy is cleaned up" "" "$(ls "${d}/Backups/" 2>/dev/null)"
+check "the game's Backups folder is a link to the local mount" "../server/gamebackups" "$(readlink "${d}/Backups")"
+check "the panel is told where the backups are" "server/backups" "$(flux-vs backups | json 'd["dir"]')"
 
 # A panel restart with a new world waiting.
 check "a new world is queued" "True" "$(flux-vs new-world '{"name":"Frontier","seed":"5","playstyle":"wilderness","size":"256000"}' | json 'd["ok"]')"
