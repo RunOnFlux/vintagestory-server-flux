@@ -351,6 +351,111 @@ class Backups(Base):
             self.vs.make_room_for_backup(1000)
         self.assertEqual(len(os.listdir(self.vs.BACKUP_DIR)), 3)
 
+    def _old(self, names_sizes):
+        os.makedirs(self.vs.OLD_BACKUP_DIR, exist_ok=True)
+        t = time.time() - 10000
+        for i, (n, size) in enumerate(names_sizes):
+            p = os.path.join(self.vs.OLD_BACKUP_DIR, n)
+            with open(p, "wb") as f:
+                f.write(b"x" * size)
+            os.utime(p, (t + i * 100, t + i * 100))
+
+    def _free(self, free):
+        real = self.vs.shutil.disk_usage
+        self.addCleanup(setattr, self.vs.shutil, "disk_usage", real)
+        self.vs.shutil.disk_usage = lambda _p: type("U", (), {"free": free, "total": 10 ** 12})()
+
+    def test_old_backups_move_to_the_local_mount_with_their_dates(self):
+        self._old([("20260101-000000-every-6h.tar.gz", 10), ("20260101-010000-start.tar.gz", 20),
+                   ("20260101-020000-before-restore.tar.gz", 30), ("20260101-030000-start.tar.gz.part", 5)])
+        before = os.stat(os.path.join(self.vs.OLD_BACKUP_DIR, "20260101-010000-start.tar.gz")).st_mtime
+        self._free(10 ** 9)
+        self.vs.BACKUP_RESERVE_BYTES = 0
+        self.vs._move_old_backups()
+        self.assertEqual(sorted(os.listdir(self.vs.BACKUP_DIR)), [
+            "20260101-000000-every-6h.tar.gz", "20260101-010000-start.tar.gz", "20260101-020000-before-restore.tar.gz"])
+        self.assertFalse(os.path.exists(self.vs.OLD_BACKUP_DIR))
+        self.assertEqual(os.stat(os.path.join(self.vs.BACKUP_DIR, "20260101-010000-start.tar.gz")).st_mtime, before)
+
+    def test_what_does_not_fit_is_removed_but_a_before_restore_stays_where_it_is(self):
+        self._old([("20260101-000000-before-restore.tar.gz", 500), ("20260101-010000-every-6h.tar.gz", 500)])
+        self._free(100)
+        self.vs.BACKUP_RESERVE_BYTES = 0
+        self.vs._move_old_backups()
+        self.assertEqual(os.listdir(self.vs.BACKUP_DIR), [])
+        self.assertEqual(os.listdir(self.vs.OLD_BACKUP_DIR), ["20260101-000000-before-restore.tar.gz"])
+
+    def test_the_move_keeps_only_the_newest_ones_the_limit_allows(self):
+        os.environ["FLUX_BACKUP_KEEP"] = "2"
+        self.addCleanup(os.environ.pop, "FLUX_BACKUP_KEEP", None)
+        self._old([(f"20260101-0{i}0000-every-6h.tar.gz", 10) for i in range(4)])
+        self._free(10 ** 9)
+        self.vs.BACKUP_RESERVE_BYTES = 0
+        self.vs._move_old_backups()
+        self.assertEqual(sorted(os.listdir(self.vs.BACKUP_DIR)), ["20260101-020000-every-6h.tar.gz", "20260101-030000-every-6h.tar.gz"])
+
+    def test_the_games_backups_folder_becomes_a_link_to_the_local_mount(self):
+        os.makedirs(self.vs.GAME_BACKUPS)
+        for n, body in (("flux-1.vcdbs", b"x"), ("keep.vcdbs", b"y"), (".syncthing.flux-0.vcdbs.tmp", b"z")):
+            with open(os.path.join(self.vs.GAME_BACKUPS, n), "wb") as f:
+                f.write(body)
+        self.vs._link_game_backups()
+        self.assertEqual(os.readlink(self.vs.GAME_BACKUPS), "../server/gamebackups")
+        self.assertEqual(os.listdir(self.vs.GAME_BACKUPS_LOCAL), ["keep.vcdbs"])
+        self.vs._link_game_backups()  # again: nothing changes
+        self.assertEqual(os.readlink(self.vs.GAME_BACKUPS), "../server/gamebackups")
+
+    def test_the_layout_removes_every_stale_half_written_copy(self):
+        self._backups([("20260101-000000-start.tar.gz.part", 10), ("20260101-010000-every-6h.tar.gz", 10)])
+        os.makedirs(self.vs.GAME_BACKUPS_LOCAL)
+        g = os.path.join(self.vs.GAME_BACKUPS_LOCAL, "flux-9.vcdbs")
+        open(g, "wb").close()
+        os.utime(g, (time.time() - 3600, time.time() - 3600))
+        self.vs.ensure_backup_layout()
+        self.assertEqual(os.listdir(self.vs.BACKUP_DIR), ["20260101-010000-every-6h.tar.gz"])
+        self.assertEqual(os.listdir(self.vs.GAME_BACKUPS_LOCAL), [])
+
+    def test_backups_never_take_more_than_their_share_of_the_volume(self):
+        self._backups([("20260101-000000-before-restore.tar.gz", 100), ("20260101-010000-every-6h.tar.gz", 100),
+                       ("20260101-020000-every-6h.tar.gz", 100), ("20260101-030000-every-6h.tar.gz", 100)])
+        real = self.vs.shutil.disk_usage
+        self.addCleanup(setattr, self.vs.shutil, "disk_usage", real)
+        self.vs.shutil.disk_usage = lambda _p: type("U", (), {"total": 600, "free": 10 ** 9})()
+        self.vs.trim_backups_to_budget(extra=0)  # 40% of 600 = 240
+        self.assertEqual(sorted(os.listdir(self.vs.BACKUP_DIR)), ["20260101-000000-before-restore.tar.gz", "20260101-030000-every-6h.tar.gz"])
+
+    def test_the_layout_leaves_a_half_written_copy_that_is_still_growing(self):
+        self._backups([("20260101-000000-start.tar.gz.part", 10)])
+        p = os.path.join(self.vs.BACKUP_DIR, "20260101-000000-start.tar.gz.part")
+        os.utime(p, None)
+        self.vs.ensure_backup_layout()
+        self.assertEqual(os.listdir(self.vs.BACKUP_DIR), ["20260101-000000-start.tar.gz.part"])
+
+    def test_the_move_never_drops_the_backup_a_restore_waits_for(self):
+        os.environ["FLUX_BACKUP_KEEP"] = "1"
+        self.addCleanup(os.environ.pop, "FLUX_BACKUP_KEEP", None)
+        self._old([(f"20260101-0{i}0000-every-6h.tar.gz", 10) for i in range(3)])
+        os.makedirs(self.vs.FLUX_DIR, exist_ok=True)
+        with open(self.vs.RESTORE, "w") as f:
+            f.write('{"file": "20260101-000000-every-6h.tar.gz"}')
+        self._free(10 ** 9)
+        self.vs.BACKUP_RESERVE_BYTES = 0
+        self.vs._move_old_backups()
+        self.assertEqual(sorted(os.listdir(self.vs.BACKUP_DIR)), ["20260101-000000-every-6h.tar.gz", "20260101-020000-every-6h.tar.gz"])
+
+    def test_the_newest_is_not_dropped_to_make_room_for_older_ones(self):
+        self._old([("20260101-000000-every-6h.tar.gz", 100), ("20260101-010000-every-6h.tar.gz", 100)])
+        real = self.vs.shutil.disk_usage
+        self.addCleanup(setattr, self.vs.shutil, "disk_usage", real)
+        self.vs.shutil.disk_usage = lambda _p: type("U", (), {"free": 150 - sum(
+            os.path.getsize(os.path.join(self.vs.BACKUP_DIR, n)) for n in os.listdir(self.vs.BACKUP_DIR))})()
+        self.vs.BACKUP_RESERVE_BYTES = 0
+        self.vs._move_old_backups()
+        self.assertEqual(os.listdir(self.vs.BACKUP_DIR), ["20260101-010000-every-6h.tar.gz"])
+
+    def test_the_panel_is_told_where_the_backups_are(self):
+        self.assertEqual(self.vs.backup_dir_for_panel(), "server/backups")
+
     def test_names_from_the_panel_are_plain_file_names(self):
         self.assertEqual(self.vs.safe_name("20261018-210204-manual.tar.gz"), "20261018-210204-manual.tar.gz")
         for bad in ("../x", "/etc/passwd", "a/b", "", ".hidden"):

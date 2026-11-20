@@ -21,7 +21,7 @@ FLUX_LOG="${FLUX_LOG-${FLUX_LOG_DIR}/flux.log}"
 FLUX_LOG_MAX_BYTES="${FLUX_LOG_MAX_BYTES:-5242880}"
 # What the hub reads: the state of the server (updating, starting, running...).
 FLUX_STATE_FILE="${FLUX_STATE_FILE:-${FLUX_DIR}/state.json}"
-FLUX_BACKUP_DIR="${FLUX_BACKUP_DIR:-${FLUX_DIR}/backups}"
+FLUX_BACKUP_DIR="${FLUX_BACKUP_DIR:-${FLUX_SERVER_DIR}/backups}"
 # The game's logs, kept off the synced volume (--logPath): server-main.log is where the console's
 # answers land, at once (measured, 1.22.7).
 FLUX_GAME_LOG_DIR="${FLUX_GAME_LOG_DIR:-${FLUX_SERVER_DIR}/logs}"

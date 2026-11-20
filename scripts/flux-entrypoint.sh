@@ -201,6 +201,7 @@ start_generation() {
 
   install_server || return 3
   [ "${terminating}" = "1" ] && return 2
+  "${PY[@]}" layout 2>&1 | while IFS= read -r line; do flux_log "${line}"; done
   out="$("${PY[@]}" apply 2>&1)"
   rc=$?
   while IFS= read -r line; do [ -n "${line}" ] && flux_log "${line}"; done <<<"${out}"

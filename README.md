@@ -27,8 +27,8 @@ version the owner asks for, and run on .NET 10 under a supervisor that:
 
 | Path | Flux mount | What |
 |---|---|---|
-| `/mnt/vs/data` | `g:` (synced) | the server's `--dataPath`: `Saves/` (the worlds), `serverconfig.json`, `Playerdata/` (roles, whitelist, bans), `Mods/`, and `flux/` (state, backups, the world catalog, disabled mods) |
-| `/mnt/vs/server` | `ml:server` (local) | the game, one folder per version under `versions/` (about 330 MB each; the running one and the one before are kept), `current` pointing at the running one, and the game's logs (`logs/`). Downloaded again on a new node Also `flux-logs/flux.log` (our supervisor log, 5 MB then one `.1`): local, never synced. |
+| `/mnt/vs/data` | `g:` (synced) | the server's `--dataPath`: `Saves/` (the worlds), `serverconfig.json`, `Playerdata/` (roles, whitelist, bans), `Mods/`, and `flux/` (state, the world catalog, disabled mods) |
+| `/mnt/vs/server` | `ml:server` (local) | the game, one folder per version under `versions/` (about 330 MB each; the running one and the one before are kept), `current` pointing at the running one, the backups (`backups/`, and `gamebackups/`, where the game writes its transient copy of the world: `Backups/` in the data folder is a symlink to it), and the game's logs (`logs/`). None of it is replicated to the other node (a backup made on one node is not on the other; the hub's daily FluxDrive backups are). Downloaded again on a new node. Also `flux-logs/flux.log` (our supervisor log, 5 MB then one `.1`): local, never synced. |
 
 Spec: `g:/mnt/vs/data|ml:server:/mnt/vs/server`.
 
@@ -56,7 +56,7 @@ the file's own value.
 | `VS_WORLD_NAME`, `VS_SEED`, `VS_PLAYSTYLE`, `VS_WORLD_SIZE` | `WorldConfig` | **the first world only** (a save that does not exist yet). Play styles: `surviveandbuild` (standard), `exploration`, `wildernesssurvival`, `homosapiens`, `creativebuilding`. Sizes: the game's `worldWidth` values, `1024000` by default |
 
 Supervisor knobs: `FLUX_BACKUP_HOURS` (6), `FLUX_BACKUP_KEEP` (8; a `before-restore` backup is
-never rotated away; a backup also deletes the oldest ones when the volume lacks the space for it, and is skipped rather than fill the volume), `FLUX_UPDATE_CHECK_MINUTES` (30, 0 = off), `FLUX_UPDATE_GRACE_MINUTES` (5),
+never rotated away; the backups never take more than 40% of the volume; a backup also deletes the oldest ones when the volume lacks the space for it, keeps 1 GiB free, and is skipped rather than fill the volume), `FLUX_UPDATE_CHECK_MINUTES` (30, 0 = off), `FLUX_UPDATE_GRACE_MINUTES` (5),
 `FLUX_RESTART_MAX_ATTEMPTS` (5 in `FLUX_RESTART_WINDOW` 3600 s, then exit 42),
 `FLUX_INSTALL_RETRY_MINUTES` (5).
 
@@ -77,7 +77,7 @@ refusal).
 | `flux-vs set-world '<json>'` | `{"temporalStorms": "rare"}` through `/worldconfig`; applied on restart. Creation-only settings are refused |
 | `flux-vs worlds` / `new-world '<json>'` / `use-world <file>` / `delete-world <file>` | the save files; a new world (`name`, `seed`, `playstyle`, `size`, `config`) or a switch on the next start, the old save kept |
 | `flux-vs mods` / `mod-install <id> [version]` / `mod-remove` / `mod-enable` / `mod-disable <modid>` / `mod-updates` / `mod-update <modid\|all>` | the ModDB mods |
-| `flux-vs backups` / `backup-now` / `restore <file>` / `delete-backup <file>` | the backups in `flux/backups` |
+| `flux-vs backups` / `backup-now` / `restore <file>` / `delete-backup <file>` | the backups in `/mnt/vs/server/backups` (`flux-vs backups` says where in `dir`) |
 | `flux-vs versions` | the stable versions, the installed one, `VS_VERSION` and what it resolves to |
 | `flux-vs restart` | a restart marker the supervisor acts on within a second; prints the generation to wait past |
 
@@ -91,6 +91,7 @@ refusal).
 
 ## Versions
 
+- 1.0.3 (2026-11-20): backups and the game's transient copy of the world are no longer replicated: they moved from the synced data volume to the local `/mnt/vs/server` (`backups/`, `gamebackups/`), no spec change. The old ones move at the first start (newest first, one file at a time; what does not fit is removed), half-written ones are removed at every start, the backups take at most 40% of the volume and 1 GiB stays free. `flux-vs backups` reports `dir`. A half-written copy is removed at start only when untouched for 2 minutes.
 - 1.0.0 (2026-10-18): first release.
 - 1.0.2 (2026-11-17): a backup no longer fills the data volume (a full volume stops the game from starting): it makes room by deleting the oldest backups first, is skipped when that is not enough, and the leftovers of an interrupted backup (`*.tar.gz.part`) are cleaned at the next one.
 - 1.0.1 (2026-10-20): `flux.log` moved off the synced data volume to `/mnt/vs/server/flux-logs/flux.log` (5 MB, one `.1`; an old one is moved there once); start-up banner; the weekly rebuild only when it has something to apply.
