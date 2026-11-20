@@ -1362,6 +1362,7 @@ BACKUP_RESERVE_BYTES = 1024 * 1024 * 1024
 # 15 GB volume with a 3.5 GB world, 8 backups of 1.1 GB left no room for the next one.
 BACKUP_VOLUME_SHARE = 0.4
 STALE_PART_SECONDS = 15 * 60
+LAYOUT_STALE_SECONDS = 2 * 60
 
 
 def clean_stale_backup_files():
@@ -1391,7 +1392,7 @@ def backup_dir_for_panel():
     for root, name in ((SERVER_DIR, "server"), (DATA_DIR, "appdata")):
         rel = os.path.relpath(BACKUP_DIR, root)
         if not rel.startswith(".."):
-            return f"{name}/{rel}".replace(os.sep, "/")
+            return name if rel == "." else f"{name}/{rel}".replace(os.sep, "/")
     return None
 
 
@@ -1435,6 +1436,7 @@ def _move_old_backups():
     if os.path.abspath(old) == os.path.abspath(BACKUP_DIR) or not os.path.isdir(old):
         return
     keep = int(os.environ.get("FLUX_BACKUP_KEEP", "8") or 8)
+    pending = (read_json(RESTORE, {}) or {}).get("file")
     files = []
     for n in os.listdir(old):
         p = os.path.join(old, n)
@@ -1444,27 +1446,29 @@ def _move_old_backups():
             m = re.match(r"^\d{8}-\d{6}-(.+)\.tar\.gz$", n)
             files.append((n, os.stat(p), m.group(1) if m else None))
     files.sort(key=lambda f: f[1].st_mtime, reverse=True)
-    files.sort(key=lambda f: f[2] != "before-restore")  # stable: those first, each group newest first
+    # Stable: the ones that are never dropped first (a before-restore, the one a restore waits for), each group newest first.
+    files.sort(key=lambda f: not (f[2] == "before-restore" or f[0] == pending))
     os.makedirs(BACKUP_DIR, exist_ok=True)
     moved = dropped = kept_in_place = 0
     plain = 0
+    leftovers = []
     for n, st, label in files:
         src, dst = os.path.join(old, n), os.path.join(BACKUP_DIR, n)
         if os.path.exists(dst):
             os.remove(src)
             continue
-        if label != "before-restore":
+        sacred = label == "before-restore" or n == pending
+        if not sacred:
             plain += 1
             if plain > keep:
                 os.remove(src)
                 dropped += 1
                 continue
         if shutil.disk_usage(BACKUP_DIR).free < st.st_size + BACKUP_RESERVE_BYTES:
-            if label == "before-restore":
+            if sacred:
                 kept_in_place += 1
             else:
-                os.remove(src)
-                dropped += 1
+                leftovers.append(src)  # dropped after the loop: a smaller, older one may still fit
             continue
         part = dst + ".part"
         try:
@@ -1478,6 +1482,9 @@ def _move_old_backups():
             continue
         os.remove(src)
         moved += 1
+    for src in leftovers:
+        os.remove(src)
+        dropped += 1
     try:
         os.rmdir(old)
     except OSError:
@@ -1489,16 +1496,19 @@ def _move_old_backups():
 def ensure_backup_layout():
     """Run at every start, before a restore or a backup reads or writes anything."""
     os.makedirs(BACKUP_DIR, exist_ok=True)
-    # Nothing is writing yet, so every half-written copy is a leftover of an interrupted backup.
+    # A half-written copy nobody has touched for 2 minutes is a leftover of an interrupted backup. A
+    # live one keeps growing, and the previous generation's backup process can outlive its restart.
+    now = time.time()
     for folder, ok in ((BACKUP_DIR, lambda n: n.endswith(".tar.gz.part")),
                        (GAME_BACKUPS_LOCAL, lambda n: n.startswith("flux-") and n.endswith(".vcdbs"))):
         for n in (os.listdir(folder) if os.path.isdir(folder) else []):
-            if ok(n):
-                try:
-                    os.remove(os.path.join(folder, n))
+            p = os.path.join(folder, n)
+            try:
+                if ok(n) and now - os.path.getmtime(p) > LAYOUT_STALE_SECONDS:
+                    os.remove(p)
                     log(f"removed the leftover of an interrupted backup: {n}")
-                except OSError:
-                    pass
+            except OSError:
+                pass
     _move_old_backups()
     _link_game_backups()
 
@@ -1542,7 +1552,7 @@ def make_room_for_backup(need, protect=None):
     Fail, deleting nothing, when that could not be enough: a backup that fills the volume stops
     the whole server, so no backup is better than that one."""
     def free():
-        return shutil.disk_usage(DATA_DIR).free
+        return shutil.disk_usage(BACKUP_DIR).free
     victims = [b for b in reversed(list_backups()[1:])
                if b["label"] != "before-restore" and b["file"] != protect]
     if free() + sum(b["size"] for b in victims) < need:
@@ -1623,7 +1633,7 @@ def cmd_backup(args):
         return 0
     try:
         name = make_backup(why, live)
-        log(f"backup ({why}): flux/backups/{name}")
+        log(f"backup ({why}): {backup_dir_for_panel() or BACKUP_DIR}/{name}")
     except Fail as e:
         log(f"backup ({why}) skipped: {e}")
     return 0

@@ -91,7 +91,7 @@ refusal).
 
 ## Versions
 
-- 1.0.3 (2026-11-20): backups and the game's transient copy of the world are no longer replicated: they moved from the synced data volume to the local `/mnt/vs/server` (`backups/`, `gamebackups/`), no spec change. The old ones move at the first start (newest first, one file at a time; what does not fit is removed), half-written ones are removed at every start, the backups take at most 40% of the volume and 1 GiB stays free. `flux-vs backups` reports `dir`.
+- 1.0.3 (2026-11-20): backups and the game's transient copy of the world are no longer replicated: they moved from the synced data volume to the local `/mnt/vs/server` (`backups/`, `gamebackups/`), no spec change. The old ones move at the first start (newest first, one file at a time; what does not fit is removed), half-written ones are removed at every start, the backups take at most 40% of the volume and 1 GiB stays free. `flux-vs backups` reports `dir`. A half-written copy is removed at start only when untouched for 2 minutes.
 - 1.0.0 (2026-10-18): first release.
 - 1.0.2 (2026-11-17): a backup no longer fills the data volume (a full volume stops the game from starting): it makes room by deleting the oldest backups first, is skipped when that is not enough, and the leftovers of an interrupted backup (`*.tar.gz.part`) are cleaned at the next one.
 - 1.0.1 (2026-10-20): `flux.log` moved off the synced data volume to `/mnt/vs/server/flux-logs/flux.log` (5 MB, one `.1`; an old one is moved there once); start-up banner; the weekly rebuild only when it has something to apply.
